@@ -27,6 +27,16 @@ uv sync
 Tanpa keduanya aplikasi gagal memuat dokumen dan sebagian test gagal karena data tidak ada, bukan karena bug kode.
 Ground truth diturunkan dari repo chatbot: `data/ground_truth/gt_master.json` dengan kolom `id, question, answer, source_id, source_type`.
 
+Penilaian retrieval memakai UID global, bukan `source_id`/`kode_mk`, karena kode MK tidak unik lintas prodi.
+`uv run python scripts/normalize_gt_ids.py` menambahkan `target_uids` ke kedua dataset JSON dan menulis pemetaan
+`source_id` → UID ke `ground_truth/gt_source_uids.csv`, plus laporan `results/gt_audit/uid_report.md`. Jalankan ulang
+setiap kali dataset atau `knowledge_base/` diganti. Kolom `source_uid` boleh berisi beberapa UID dipisah `;` untuk MK
+yang sama di beberapa prodi; kolom `status` menandai baris yang belum bisa dipetakan (`kode-ambigu`,
+`butuh-dokumen-asal`) tanpa mengubah `GT_MASTER.csv`.
+
+Patch data yang menunggu adopsi dataset bersama ada di `docs/patches/`. Saat ini
+`sop-source-name.patch` memperbaiki `source_name` delapan butir SOP; setelah diterapkan, indeks Dense wajib dibuat ulang.
+
 ### Data web FTMM (terisolasi)
 
 Informasi publik `ftmm.unair.ac.id` masuk ke `web_kb/`, bukan `knowledge_base/`. Cara lengkap
@@ -226,6 +236,29 @@ kombinasi model/metode/top-k untuk memulai run baru.
 
 Retrieval soal regulasi tidak dinilai karena `source_id`-nya tidak menunjuk ke satu butir yang pasti:
 angka yang sama dipakai di beberapa file panduan, dan banyak soal merujuk beberapa sumber sekaligus.
+
+### Identitas target (UID)
+
+`run_bm25.py` menilai peringkat terhadap UID, bukan kode MK. Format UID: `MK:<akronim>:<id>` untuk kurikulum,
+`REG:<topik>:<id>` untuk regulasi, dan `chunk_id` untuk unit web. UID unik di seluruh korpus, termasuk dua mata kuliah
+yang memakai kode sama dalam satu prodi.
+
+- `ir_eval_dataset.json` menilai secara prodi-agnostik: target = semua UID dengan kode dan nama yang sama.
+- `retrieval_complexity_benchmark.json` menilai per prodi: target = UID pada prodi yang disebut kueri.
+- `metrics.csv` memakai kolom `penilaian` = `uid`; `kode` dan `kode+prodi` hanya untuk pembanding laporan lama.
+- Dataset tanpa `target_uids` ditolak `lib/evaluate.py` dengan pesan untuk menjalankan `scripts/normalize_gt_ids.py`.
+
+Kebijakan target: **default satu UID**, yaitu dokumen yang memuat bukti yang diminta soal. Soal prosedur memakai
+`REG:sop:N`; soal aturan memakai `REG:<topik>:N`. Target ganda hanya bila soal menuntut dua bukti sekaligus.
+Dokumen yang "kira-kira relevan" tidak boleh ditambahkan: pada kueri prosedur, dokumen aturan kerap menang di
+peringkat teratas, dan target ganda akan memberi `hit@1` penuh pada retriever yang tidak pernah mengembalikan prosedur.
+
+### Log eksekusi
+
+Skrip menulis log sendiri ke direktori run (`results/<run>/`): `run.log` (stdout + stderr + `argv`), `log.jsonl`
+(satu objek per tahap), dan `errors.log` (traceback saat gagal). Jalur Streamlit mencatat per soal lewat
+`jejak_<name>.jsonl`; terminalnya dicatat dengan `uv run streamlit run app.py 2>&1 | tee results/evaluasi/streamlit.log`.
+`build_index.py` menulis ke `results/build_index/`, `scripts/normalize_gt_ids.py` ke `results/gt_audit/`.
 
 Saat menafsirkan hasil:
 
