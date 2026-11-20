@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from lib import run_manifest
+from lib import run_manifest, runlog
 from lib.kb import PRODI_BY_ACRONYM, ROOT, Course
 from lib.metrics import score_ranking
 from lib.rag import corpus_hash
@@ -63,11 +63,13 @@ def uid_targets(item: dict) -> set[str]:
     return uids
 
 
-def eval_ir(search: SearchFn, courses: list[Course], queries: list[dict]) -> list[dict]:
+def eval_ir(search: SearchFn, courses: list[Course], queries: list[dict], progress=None, catatan=None) -> list[dict]:
     records = []
-    for q in queries:
+    for nomor, q in enumerate(queries, start=1):
         targets = uid_targets(q)
         hits, latency = run_search(search, q["question"])
+        if progress:
+            progress("ir_eval", nomor, len(queries))
         records.append(
             {
                 "dataset": "ir_eval",
@@ -83,15 +85,18 @@ def eval_ir(search: SearchFn, courses: list[Course], queries: list[dict]) -> lis
                 "skor_kode": score_ranking(
                     (courses[i].kode for i, *_ in hits), {k.strip() for k in q["target_kode_mk"]}
                 ),
+                **(catatan or {}).get(q["question"], {}),
             }
         )
     return records
 
 
-def eval_complexity(search: SearchFn, courses: list[Course], queries: list[dict]) -> list[dict]:
+def eval_complexity(search: SearchFn, courses: list[Course], queries: list[dict], progress=None, catatan=None) -> list[dict]:
     records = []
-    for q in queries:
+    for nomor, q in enumerate(queries, start=1):
         hits, latency = run_search(search, q["query"])
+        if progress:
+            progress("complexity", nomor, len(queries))
         record = {
             "dataset": "complexity",
             "id": q["id"],
@@ -114,6 +119,7 @@ def eval_complexity(search: SearchFn, courses: list[Course], queries: list[dict]
                 ((courses[i].kode, courses[i].prodi) for i, *_ in hits),
                 {(code, prodi) for code in codes},
             )
+        record.update((catatan or {}).get(q["query"], {}))
         records.append(record)
     return records
 
@@ -193,7 +199,9 @@ def write_report(
     ir_records: list[dict],
     complexity_records: list[dict],
     unreachable: int,
+    meta: dict | None = None,
 ) -> list[dict]:
+    meta = meta or {}
     output_dir.mkdir(parents=True, exist_ok=True)
     rows = build_rows(ir_records, complexity_records)
     oos = out_of_scope_stats(complexity_records)
@@ -237,29 +245,55 @@ def write_report(
         {
             "jenis": "retrieval",
             "metode": method,
-            "provider": "lokal",
-            "model": "-",
-            "top_k": TOP_TRACE,
-            "embedding": "-",
+            "provider": meta.get("provider", "lokal"),
+            "model": meta.get("model", "-"),
+            "top_k": meta.get("top_k", TOP_TRACE),
+            "top_k_eval": TOP_TRACE,
+            "embedding": meta.get("embedding", "-"),
+            "embed_keep_alive": meta.get("embed_keep_alive"),
+            "bm25_k1": meta.get("bm25_k1"),
+            "bm25_b": meta.get("bm25_b"),
+            "varian_kueri": meta.get("varian_kueri", "asli"),
             "corpus_sha256": corpus_hash(courses),
             "dataset": "ir_eval+complexity",
             "dataset_sha256": run_manifest.file_sha256(GT_DIR / "ir_eval_dataset.json"),
+            "dataset_sha256_complexity": run_manifest.file_sha256(GT_DIR / "retrieval_complexity_benchmark.json"),
             "n_unit": len(ir_records) + len(complexity_records),
         },
     )
     return rows
 
 
-def run(method: str, search: SearchFn, courses: list[Course], output_dir: Path, limit: int | None = None) -> None:
+def lapor_progres(output_dir: Path):
+    """Satu event JSONL tiap 25 unit, supaya run panjang bisa dipantau tanpa log per kueri."""
+
+    def lapor(dataset: str, nomor: int, total: int) -> None:
+        if nomor % 25 == 0 or nomor == total:
+            runlog.catat_event(output_dir, tahap="progres", dataset=dataset, kueri=nomor, total=total)
+
+    return lapor
+
+
+def run(
+    method: str,
+    search: SearchFn,
+    courses: list[Course],
+    output_dir: Path,
+    limit: int | None = None,
+    meta: dict | None = None,
+    catatan: dict | None = None,
+) -> None:
     ir_queries, complexity_queries = load_queries()
     if limit is not None:
         ir_queries = ir_queries[:limit]
         complexity_queries = complexity_queries[:limit] + complexity_queries[-limit:]
 
-    ir_records = eval_ir(search, courses, ir_queries)
-    complexity_records = eval_complexity(search, courses, complexity_queries)
+    ir_records = eval_ir(search, courses, ir_queries, progress=lapor_progres(output_dir), catatan=catatan)
+    complexity_records = eval_complexity(
+        search, courses, complexity_queries, progress=lapor_progres(output_dir), catatan=catatan
+    )
     unreachable = count_unreachable(courses, complexity_queries)
-    rows = write_report(method, output_dir, courses, ir_records, complexity_records, unreachable)
+    rows = write_report(method, output_dir, courses, ir_records, complexity_records, unreachable, meta)
 
     print(f"Metode: {method} | korpus: {len(courses)} | target tak terjangkau kode+prodi: {unreachable}")
     for row in rows:
